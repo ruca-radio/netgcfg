@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -124,7 +125,18 @@ func TestJSONRoundTrip(t *testing.T) {
 		t.Fatalf("ToJSON re-encoded: %v", err)
 	}
 
-	if !bytes.Equal(json1, json2) {
+	// The metadata.header signature is content-derived, so it legitimately
+	// changes when the XML is regenerated. Compare the config subtree only.
+	var w1, w2 struct {
+		Config any `json:"config"`
+	}
+	if err := json.Unmarshal(json1, &w1); err != nil {
+		t.Fatalf("unmarshal json1: %v", err)
+	}
+	if err := json.Unmarshal(json2, &w2); err != nil {
+		t.Fatalf("unmarshal json2: %v", err)
+	}
+	if !reflect.DeepEqual(w1.Config, w2.Config) {
 		t.Fatal("JSON round-trip changed the configuration")
 	}
 }

@@ -2,6 +2,7 @@ package rax
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,9 +11,16 @@ import (
 
 // magicPrefix identifies a Netgear Broadcom (RAX-series) config backup. The
 // file starts with a 40-byte header: a 2-byte version (0x0002), a 2-byte
-// length (0x0020 = 32), a 32-byte signature/hash whose derivation is unknown
-// (preserved verbatim on re-encode), and 4 reserved zero bytes.
+// length (0x0020 = 32), a 32-byte signature (see signConfig), and 4 reserved
+// zero bytes.
 var magicPrefix = []byte{0x00, 0x02, 0x00, 0x20}
+
+// signSaltPrefix/signSaltSuffix are the hardcoded constants prepended/appended
+// to the signing payload by the device firmware (puUtl_signCfg in libpu_util).
+const (
+	signSaltPrefix = "hr89sdfgjkehx"
+	signSaltSuffix = "nohsli9fjh3f"
+)
 
 const (
 	headerSize      = 40
@@ -87,21 +95,49 @@ func Decrypt(data []byte) (*Config, error) {
 }
 
 // Encrypt compresses the XML payload and rebuilds a config backup, recomputing
-// the payload length and JAMCRC checksum.
+// the payload length, JAMCRC checksum, and header signature.
 func (c *Config) Encrypt() ([]byte, error) {
 	comp := lzwCompress(c.configXML)
 	crc := jamCRC(comp)
 
+	desc := append(
+		padNUL([]byte(fmt.Sprintf("<compressed alg=lzw len=%d>", len(comp))), field1Size),
+		padNUL([]byte(fmt.Sprintf("<crc=0x%x>", crc)), field2Size)...)
+
 	var buf bytes.Buffer
-	buf.Write(c.header[:])
 	writeTLV(&buf, tlvFirmware, []byte(c.firmware))
 	writeTLV(&buf, tlvFirmwareMaj, []byte(c.firmwareMajor))
 	writeTLV(&buf, tlvModel, []byte(c.model))
 	writeTLV(&buf, tlvPayload, nil)
-	buf.Write(padNUL([]byte(fmt.Sprintf("<compressed alg=lzw len=%d>", len(comp))), field1Size))
-	buf.Write(padNUL([]byte(fmt.Sprintf("<crc=0x%x>", crc)), field2Size))
-	buf.Write(comp)
-	return buf.Bytes(), nil
+
+	// Recompute the header signature over: 4 zero bytes + TLV records + the
+	// description block + the compressed payload, bracketed by two salts.
+	sig := signConfig(buf.Bytes(), desc, comp)
+
+	header := c.header
+	copy(header[4:36], sig)
+
+	out := make([]byte, 0, headerSize+len(buf.Bytes())+len(desc)+len(comp))
+	out = append(out, header[:]...)
+	out = append(out, buf.Bytes()...)
+	out = append(out, desc...)
+	out = append(out, comp...)
+	return out, nil
+}
+
+// signConfig computes the 32-byte header signature the device verifies on
+// restore. The input is the TLV record block, the description block, and the
+// compressed payload, wrapped in the firmware's two hardcoded salts.
+func signConfig(tlvBlock, desc, comp []byte) []byte {
+	var b bytes.Buffer
+	b.WriteString(signSaltPrefix)
+	b.Write([]byte{0, 0, 0, 0}) // four leading zero bytes before the TLV records
+	b.Write(tlvBlock)
+	b.Write(desc)
+	b.Write(comp)
+	b.WriteString(signSaltSuffix)
+	sum := sha256.Sum256(b.Bytes())
+	return sum[:]
 }
 
 func writeTLV(buf *bytes.Buffer, typ uint16, val []byte) {
