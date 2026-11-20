@@ -3,6 +3,7 @@ package rax
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,6 +150,59 @@ func TestJSONRoundTripRaw(t *testing.T) {
 	}
 	if !bytes.Equal(reenc, fixture) {
 		t.Fatalf("raw JSON round-trip should be byte-identical (%d vs %d bytes)", len(reenc), len(fixture))
+	}
+}
+
+// TestFromJSONRejectsBadShapes verifies that structurally-invalid config trees
+// fail loudly instead of silently producing a broken .cfg.
+func TestFromJSONRejectsBadShapes(t *testing.T) {
+	fixture := loadFixture(t)
+	c, err := Decrypt(fixture)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+
+	mutate := func(mut func(m map[string]any)) []byte {
+		w, err := c.ToJSON(false)
+		if err != nil {
+			t.Fatalf("ToJSON: %v", err)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(w, &obj); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		cfg := obj["config"].(map[string]any)
+		mut(cfg)
+		b, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		return b
+	}
+
+	cases := []struct {
+		name string
+		mut  func(m map[string]any)
+	}{
+		{"empty array", func(m map[string]any) {
+			root := m["DslCpeConfig"].(map[string]any)
+			root["Device"] = []any{}
+		}},
+		{"number value", func(m map[string]any) {
+			root := m["DslCpeConfig"].(map[string]any)
+			root["Device"] = float64(42)
+		}},
+		{"bad element name", func(m map[string]any) {
+			root := m["DslCpeConfig"].(map[string]any)
+			root["1Bad Name!"] = "x"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := FromJSON(mutate(tc.mut)); err == nil {
+				t.Fatalf("expected FromJSON to reject %s", tc.name)
+			}
+		})
 	}
 }
 

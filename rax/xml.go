@@ -10,6 +10,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // Metadata is the JSON wrapper's metadata block. It carries everything needed
@@ -101,9 +102,16 @@ func FromJSON(data []byte) (*Config, error) {
 		return c, nil
 	}
 	if w.Config != nil {
+		if err := validateConfigNode(w.Config, "$"); err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
 		xmlBytes, err := buildConfigXML(w.Config)
 		if err != nil {
 			return nil, err
+		}
+		// Self-check: the regenerated XML must parse back into a stable tree.
+		if _, err := parseConfigXML(xmlBytes); err != nil {
+			return nil, fmt.Errorf("config does not round-trip through XML: %w", err)
 		}
 		c.configXML = xmlBytes
 		return c, nil
@@ -221,6 +229,85 @@ func attrsToMap(attrs []xml.Attr) map[string]any {
 		m[a.Name.Local] = a.Value
 	}
 	return m
+}
+
+// validateConfigNode checks the shape of a parsed config tree before it is
+// turned back into XML. It exists so that a hand-edited wrapper that is valid
+// JSON but structurally wrong fails loudly with a useful message, rather than
+// silently producing a .cfg the router will reject.
+func validateConfigNode(node any, path string) error {
+	switch v := node.(type) {
+	case string:
+		return nil
+	case []any:
+		if len(v) == 0 {
+			return fmt.Errorf("%s: empty array (an XML element must have at least one occurrence)", path)
+		}
+		for i, item := range v {
+			switch item.(type) {
+			case string, map[string]any:
+				if err := validateConfigNode(item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("%s[%d]: unsupported value type %T (want string or object)", path, i, item)
+			}
+		}
+		return nil
+	case map[string]any:
+		for k, child := range v {
+			switch k {
+			case keyAttrs:
+				attrs, ok := child.(map[string]any)
+				if !ok {
+					return fmt.Errorf("%s: %q must be an object", path, keyAttrs)
+				}
+				for an, av := range attrs {
+					if s, ok := av.(string); !ok {
+						return fmt.Errorf("%s.%s.%s: attribute value must be a string, got %T", path, keyAttrs, an, av)
+					} else if !validXMLName(an) {
+						return fmt.Errorf("%s.%s: invalid attribute name %q", path, keyAttrs, an)
+					} else if !utf8.ValidString(s) {
+						return fmt.Errorf("%s.%s.%s: attribute value is not valid UTF-8", path, keyAttrs, an)
+					}
+				}
+			case keyText:
+				if _, ok := child.(string); !ok {
+					return fmt.Errorf("%s: %q must be a string", path, keyText)
+				}
+			default:
+				if !validXMLName(k) {
+					return fmt.Errorf("%s: invalid element name %q", path, k)
+				}
+				if err := validateConfigNode(child, path+"/"+k); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s: unsupported value type %T (want string, object, or array)", path, node)
+	}
+}
+
+// validXMLName reports whether s is a plausible XML element/attribute name.
+func validXMLName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || r == ':' || r == '.' || r == '-':
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return false // XML names cannot start with a digit
+			}
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // buildConfigXML converts a JSON object (whose single key is the root element
