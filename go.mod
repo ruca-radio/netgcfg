@@ -1,4 +1,4 @@
-module github.com/fysac/orbicfg
+module github.com/ruca-radio/netgcfg
 
 go 1.19
 

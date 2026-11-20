@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/fysac/orbicfg/rand/musl"
-	"github.com/fysac/orbicfg/rand/uclibc"
+	"github.com/ruca-radio/netgcfg/rand/musl"
+	"github.com/ruca-radio/netgcfg/rand/uclibc"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 

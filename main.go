@@ -1,15 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"log"
 	"os"
 
-	"github.com/fysac/orbicfg/cfg"
+	"github.com/ruca-radio/netgcfg/cfg"
+	"github.com/ruca-radio/netgcfg/rax"
 )
 
 const openIssueMsg = `
-Please open a bug report at https://github.com/Fysac/orbicfg/issues.
+Please open a bug report at https://github.com/ruca-radio/netgcfg/issues.
 Include the exact command that failed, the error message, and the the model and firmware version of your device.`
 
 func main() {
@@ -32,15 +34,28 @@ func main() {
 		if err != nil {
 			l.Fatal(err)
 		}
-		_, configBytes, metadata, err := cfg.Decrypt(b)
-		if err != nil {
-			l.Println("decrypt config:", err)
-			l.Fatalln(openIssueMsg)
-		}
-		wrapperJSON, err := cfg.ToJSON(configBytes, metadata, *raw)
-		if err != nil {
-			l.Println("create json wrapper:", err)
-			l.Fatalln(openIssueMsg)
+
+		var wrapperJSON []byte
+		if rax.IsRAXConfig(b) {
+			c, err := rax.Decrypt(b)
+			if err != nil {
+				l.Println("decrypt config:", err)
+				l.Fatalln(openIssueMsg)
+			}
+			if wrapperJSON, err = c.ToJSON(*raw); err != nil {
+				l.Println("create json wrapper:", err)
+				l.Fatalln(openIssueMsg)
+			}
+		} else {
+			_, configBytes, metadata, err := cfg.Decrypt(b)
+			if err != nil {
+				l.Println("decrypt config:", err)
+				l.Fatalln(openIssueMsg)
+			}
+			if wrapperJSON, err = cfg.ToJSON(configBytes, metadata, *raw); err != nil {
+				l.Println("create json wrapper:", err)
+				l.Fatalln(openIssueMsg)
+			}
 		}
 
 		if err := writeFileNoTrunc(*outputFile, wrapperJSON); err != nil {
@@ -57,14 +72,26 @@ func main() {
 		if err != nil {
 			l.Fatal(err)
 		}
-		configBytes, metadata, err := cfg.FromJSON(wrapperJSON)
-		if err != nil {
-			l.Fatalln("parse json wrapper:", err)
-		}
-		encryptedConfig, err := cfg.Encrypt(configBytes, metadata)
-		if err != nil {
-			l.Println("encrypt config:", err)
-			l.Fatalln(openIssueMsg)
+
+		var encryptedConfig []byte
+		if isRAXJSON(wrapperJSON) {
+			c, err := rax.FromJSON(wrapperJSON)
+			if err != nil {
+				l.Fatalln("parse json wrapper:", err)
+			}
+			if encryptedConfig, err = c.Encrypt(); err != nil {
+				l.Println("encrypt config:", err)
+				l.Fatalln(openIssueMsg)
+			}
+		} else {
+			configBytes, metadata, err := cfg.FromJSON(wrapperJSON)
+			if err != nil {
+				l.Fatalln("parse json wrapper:", err)
+			}
+			if encryptedConfig, err = cfg.Encrypt(configBytes, metadata); err != nil {
+				l.Println("encrypt config:", err)
+				l.Fatalln(openIssueMsg)
+			}
 		}
 
 		if err := writeFileNoTrunc(*outputFile, encryptedConfig); err != nil {
@@ -74,6 +101,20 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+}
+
+// isRAXJSON reports whether a JSON wrapper was produced by the RAX/Broadcom
+// codec (identified by metadata.format).
+func isRAXJSON(b []byte) bool {
+	var probe struct {
+		Metadata *struct {
+			Format string `json:"format"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil || probe.Metadata == nil {
+		return false
+	}
+	return probe.Metadata.Format == rax.FormatName
 }
 
 func writeFileNoTrunc(name string, b []byte) error {
